@@ -6,6 +6,10 @@
 # Changelog:
 # - In CheckPassword(), the hash_equals native php function is now used instead
 #   of '===' comparaison to prevent timing attacks
+# - Introducing more data to $random_state in the constuctor. (from okaresz.v1)
+# - In gensalt_blowfish() if PHP_VERSION >= 5.3.7, use the new, fixed BLOWFISH salt id. (from okaresz.v1)
+# - Improve get_random_bytes() by adding more methods and by introducing more data to the entropy pool. (from okaresz.v1)
+#   Some of the code is from the SecurityMultiTool by padraic and from ircmaxell's RandomLib and password_compat.
 #
 # Written by Solar Designer <solar at openwall.com> in 2004-2006 and placed in
 # the public domain.  Revised in subsequent years, still public domain.
@@ -34,7 +38,7 @@ class PasswordHash {
 	var $random_state;
 
 	function __construct($iteration_count_log2, $portable_hashes)
-	{
+	{	
 		$this->itoa64 = './0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
 
 		if ($iteration_count_log2 < 4 || $iteration_count_log2 > 31) {
@@ -48,6 +52,7 @@ class PasswordHash {
 		if (function_exists('getmypid')) {
 			$this->random_state .= getmypid();
 		}
+		$this->random_state .= md5(serialize($_SERVER));
 	}
 
 	function PasswordHash($iteration_count_log2, $portable_hashes)
@@ -58,22 +63,53 @@ class PasswordHash {
 	function get_random_bytes($count)
 	{
 		$output = '';
+		
+		if( function_exists('openssl_random_pseudo_bytes' ) )
+		{
+		    $output = openssl_random_pseudo_bytes($count, $usable);
+		    if (true === $usable) {
+			return $output;
+		    }
+		}
+		if( function_exists('mcrypt_create_iv')
+		    && (version_compare(PHP_VERSION, '5.3.0') >= 0 )
+		    || (strtoupper(substr(PHP_OS, 0, 3)) !== 'WIN')
+		    && !defined('PHALANGER')
+		) {
+		    $output = mcrypt_create_iv($count, MCRYPT_DEV_URANDOM);
+		    if ($output !== false && strlen($output) === $count) {
+			return $output;
+		    }
+		}
+		
 		if (@is_readable('/dev/urandom') &&
 		    ($fh = @fopen('/dev/urandom', 'rb'))) {
-			$output = fread($fh, $count);
-			fclose($fh);
+		    $output = fread($fh, $count);
+		    fclose($fh);
 		}
-
+		
 		if (strlen($output) < $count) {
-			$output = '';
-			for ($i = 0; $i < $count; $i += 16) {
-				$this->random_state =
-				    md5(microtime() . $this->random_state);
-				$output .= md5($this->random_state, TRUE);
-			}
-			$output = substr($output, 0, $count);
+		    $output = '';
+		    $seed = microtime() . memory_get_usage();
+		    if( function_exists('gc_collect_cycles') )
+			{ gc_collect_cycles(); }
+		    else
+		    {
+			$i = 0;
+			while( $i < 32)
+			    { $i += 1+(int)round(lcg_value()); }
+		    }
+		
+		    $this->random_state .= $seed . microtime();
+		    for ($i = 0; $i < $count; $i += 16)
+		    {
+		
+			$this->random_state =  md5(microtime() . $this->random_state);
+			$output .= pack('H*', md5(substr($this->random_state,0,16)));
+		    }
+		    $output = substr($output, 0, $count);
 		}
-
+		
 		return $output;
 	}
 
@@ -168,7 +204,7 @@ class PasswordHash {
 		# of entropy.
 		$itoa64 = './ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 
-		$output = '$2a$';
+		$output = (version_compare(PHP_VERSION, '5.3.7') >= 0)? '$2y$' : '$2a$';
 		$output .= chr((int)(ord('0') + $this->iteration_count_log2 / 10));
 		$output .= chr(ord('0') + $this->iteration_count_log2 % 10);
 		$output .= '$';
